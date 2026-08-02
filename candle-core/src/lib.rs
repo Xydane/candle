@@ -128,10 +128,11 @@ pub use metal_backend::{MetalDevice, MetalError, MetalStorage};
 pub use dummy_metal_backend::{MetalDevice, MetalError, MetalStorage};
 
 #[cfg(feature = "openvino")]
-pub use openvino_backend::{OpenVinoDevice, OpenVinoError, OpenVinoStorage};
+pub use openvino_backend::{OpenVinoDevice, OpenVinoStorage};
+pub use dummy_openvino_backend::OpenVinoError;
 
 #[cfg(not(feature = "openvino"))]
-pub use dummy_openvino_backend::{OpenVinoDevice, OpenVinoError, OpenVinoStorage};
+pub use dummy_openvino_backend::{OpenVinoDevice, OpenVinoStorage};
 
 #[cfg(feature = "mkl")]
 extern crate intel_mkl_src;

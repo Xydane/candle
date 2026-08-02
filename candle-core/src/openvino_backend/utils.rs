@@ -9,7 +9,7 @@ use crate::{DType, Error, Layout, Result};
 use float8::F8E4M3;
 use half::{bf16, f16};
 
-use super::error::OpenVinoError;
+use super::super::dummy_openvino_backend::OpenVinoError;
 
 // ── CpuStorage → raw bytes ───────────────────────────────────────────────────
 
