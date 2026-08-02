@@ -16,6 +16,7 @@ candle-kernels = { workspace = true, optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
 objc2-metal = { workspace = true, optional = true }
 objc2-foundation = { workspace = true, optional = true }
+openvino = { workspace = true, optional = true }
 cudarc = { workspace = true, optional = true }
 gemm = { workspace = true }
 half = { workspace = true, features = ["zerocopy"] }
@@ -60,6 +61,7 @@ metal = [
 ]
 metal-debug-labels = ["metal", "candle-metal-kernels/debug-labels"]
 ug = ["dep:candle-ug"]
+openvino = ["dep:openvino"]
 
 [[bench]]
 name = "bench_main"

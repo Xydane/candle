@@ -130,6 +130,10 @@ fn from_raw_data<T: super::GgmlType + Send + Sync + 'static>(
         Device::Cpu => QStorage::Cpu(Box::new(data.to_vec())),
         Device::Metal(metal) => super::metal::load_quantized(metal, data)?,
         Device::Cuda(cuda) => super::cuda::load_quantized(cuda, data)?,
+        Device::OpenVino(_) => {
+            // Fall back to CPU-hosted quantized storage for OpenVINO.
+            QStorage::Cpu(Box::new(data.to_vec()))
+        }
     };
     super::QTensor::new(data, dims)
 }

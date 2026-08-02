@@ -1,7 +1,7 @@
-use crate::backend::BackendStorage;
+use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{self, CmpOp, ReduceOp};
 use crate::scalar::Scalar;
-use crate::{CpuStorage, CudaStorage, DType, Device, Error, Layout, MetalStorage, Result, Shape};
+use crate::{CpuStorage, CudaStorage, DType, Device, Error, Layout, MetalStorage, OpenVinoStorage, Result, Shape};
 use crate::{CustomOp1, CustomOp2, CustomOp3, InplaceOp1, InplaceOp2, InplaceOp3};
 
 // We do not want to implement Clone on Storage as cloning may fail because of
@@ -11,6 +11,7 @@ pub enum Storage {
     Cpu(CpuStorage),
     Cuda(CudaStorage),
     Metal(MetalStorage),
+    OpenVino(OpenVinoStorage),
 }
 
 impl Storage {
@@ -25,6 +26,10 @@ impl Storage {
                 let storage = storage.try_clone(layout)?;
                 Ok(Self::Metal(storage))
             }
+            Self::OpenVino(storage) => {
+                let storage = storage.try_clone(layout)?;
+                Ok(Self::OpenVino(storage))
+            }
         }
     }
 
@@ -33,6 +38,7 @@ impl Storage {
             Self::Cpu(_) => Device::Cpu,
             Self::Cuda(storage) => Device::Cuda(storage.device().clone()),
             Self::Metal(storage) => Device::Metal(storage.device().clone()),
+            Self::OpenVino(storage) => Device::OpenVino(storage.device().clone()),
         }
     }
 
@@ -41,6 +47,7 @@ impl Storage {
             Self::Cpu(storage) => storage.dtype(),
             Self::Cuda(storage) => storage.dtype(),
             Self::Metal(storage) => storage.dtype(),
+            Self::OpenVino(storage) => storage.dtype(),
         }
     }
 
@@ -53,6 +60,8 @@ impl Storage {
             // On metal, we require the device to be exactly the same rather than
             // having the same location. In cuda this is not necessary as all CudaDevice on the
             // same GPU will use the same cuda stream.
+            lhs_device.same_device(&rhs_device)
+        } else if self.device().is_openvino() {
             lhs_device.same_device(&rhs_device)
         } else {
             lhs == rhs
@@ -79,6 +88,7 @@ impl Storage {
             Storage::Cpu(storage) => storage.const_set(v, l),
             Storage::Cuda(storage) => storage.const_set(v, l),
             Storage::Metal(storage) => storage.const_set(v, l),
+            Storage::OpenVino(storage) => storage.const_set(v, l),
         }
     }
 
@@ -95,6 +105,10 @@ impl Storage {
             Self::Metal(storage) => {
                 let storage = storage.affine(layout, mul, add)?;
                 Ok(Self::Metal(storage))
+            }
+            Self::OpenVino(storage) => {
+                let storage = storage.affine(layout, mul, add)?;
+                Ok(Self::OpenVino(storage))
             }
         }
     }
@@ -113,6 +127,10 @@ impl Storage {
                 let storage = storage.powf(layout, alpha)?;
                 Ok(Self::Metal(storage))
             }
+            Self::OpenVino(storage) => {
+                let storage = storage.powf(layout, alpha)?;
+                Ok(Self::OpenVino(storage))
+            }
         }
     }
 
@@ -129,6 +147,10 @@ impl Storage {
             Self::Metal(storage) => {
                 let storage = storage.elu(layout, alpha)?;
                 Ok(Self::Metal(storage))
+            }
+            Self::OpenVino(storage) => {
+                let storage = storage.elu(layout, alpha)?;
+                Ok(Self::OpenVino(storage))
             }
         }
     }
@@ -155,9 +177,11 @@ impl Storage {
                 let storage = lhs.cmp(op, rhs, lhs_layout, rhs_layout)?;
                 Ok(Self::Metal(storage))
             }
+            (Self::OpenVino(lhs), Self::OpenVino(rhs)) => {
+                let storage = lhs.cmp(op, rhs, lhs_layout, rhs_layout)?;
+                Ok(Self::OpenVino(storage))
+            }
             (lhs, rhs) => {
-                // Should not happen because of the same device check above but we're defensive
-                // anyway.
                 Err(Error::DeviceMismatchBinaryOp {
                     lhs: lhs.device().location(),
                     rhs: rhs.device().location(),
@@ -182,6 +206,10 @@ impl Storage {
                 let storage = storage.reduce_op(op, layout, s)?;
                 Ok(Self::Metal(storage))
             }
+            Self::OpenVino(storage) => {
+                let storage = storage.reduce_op(op, layout, s)?;
+                Ok(Self::OpenVino(storage))
+            }
         }
     }
 
@@ -199,6 +227,10 @@ impl Storage {
                 let storage = storage.to_dtype(layout, dtype)?;
                 Ok(Self::Metal(storage))
             }
+            Self::OpenVino(storage) => {
+                let storage = storage.to_dtype(layout, dtype)?;
+                Ok(Self::OpenVino(storage))
+            }
         }
     }
 
@@ -215,6 +247,14 @@ impl Storage {
             Self::Metal(storage) => {
                 let (storage, shape) = c.metal_fwd(storage, l)?;
                 Ok((Self::Metal(storage), shape))
+            }
+            Self::OpenVino(storage) => {
+                // Custom ops fall back through CPU for OpenVINO storage.
+                let cpu = storage.to_cpu_storage()?;
+                let (out_cpu, shape) = c.cpu_fwd(&cpu, l)?;
+                let dev = storage.device();
+                let out_ov = dev.storage_from_cpu_storage(&out_cpu)?;
+                Ok((Self::OpenVino(out_ov), shape))
             }
         }
     }
@@ -239,6 +279,13 @@ impl Storage {
             (Self::Metal(s1), Self::Metal(s2)) => {
                 let (s, shape) = c.metal_fwd(s1, l1, s2, l2)?;
                 Ok((Self::Metal(s), shape))
+            }
+            (Self::OpenVino(s1), Self::OpenVino(s2)) => {
+                let cpu1 = s1.to_cpu_storage()?;
+                let cpu2 = s2.to_cpu_storage()?;
+                let (out_cpu, shape) = c.cpu_fwd(&cpu1, l1, &cpu2, l2)?;
+                let out_ov = s1.device().storage_from_cpu_storage(&out_cpu)?;
+                Ok((Self::OpenVino(out_ov), shape))
             }
             _ => unreachable!(),
         }
@@ -268,6 +315,14 @@ impl Storage {
                 let (s, shape) = c.metal_fwd(s1, l1, s2, l2, s3, l3)?;
                 Ok((Self::Metal(s), shape))
             }
+            (Self::OpenVino(s1), Self::OpenVino(s2), Self::OpenVino(s3)) => {
+                let cpu1 = s1.to_cpu_storage()?;
+                let cpu2 = s2.to_cpu_storage()?;
+                let cpu3 = s3.to_cpu_storage()?;
+                let (out_cpu, shape) = c.cpu_fwd(&cpu1, l1, &cpu2, l2, &cpu3, l3)?;
+                let out_ov = s1.device().storage_from_cpu_storage(&out_cpu)?;
+                Ok((Self::OpenVino(out_ov), shape))
+            }
             _ => unreachable!(),
         }
     }
@@ -277,6 +332,13 @@ impl Storage {
             Self::Cpu(storage) => c.cpu_fwd(storage, l),
             Self::Cuda(storage) => c.cuda_fwd(storage, l),
             Self::Metal(storage) => c.metal_fwd(storage, l),
+            Self::OpenVino(storage) => {
+                let cpu = storage.to_cpu_storage()?;
+                let mut cpu_mut = cpu;
+                c.cpu_fwd(&mut cpu_mut, l)?;
+                storage.replace_storage_from_cpu(cpu_mut)?;
+                Ok(())
+            }
         }
     }
 
@@ -292,6 +354,14 @@ impl Storage {
             (Self::Cpu(s1), Self::Cpu(s2)) => c.cpu_fwd(s1, l1, s2, l2),
             (Self::Cuda(s1), Self::Cuda(s2)) => c.cuda_fwd(s1, l1, s2, l2),
             (Self::Metal(s1), Self::Metal(s2)) => c.metal_fwd(s1, l1, s2, l2),
+            (Self::OpenVino(s1), Self::OpenVino(s2)) => {
+                let cpu2 = s2.to_cpu_storage()?;
+                let cpu1 = s1.to_cpu_storage()?;
+                let mut cpu1_mut = cpu1;
+                c.cpu_fwd(&mut cpu1_mut, l1, &cpu2, l2)?;
+                s1.replace_storage_from_cpu(cpu1_mut)?;
+                Ok(())
+            }
             _ => unreachable!(),
         }
     }
@@ -313,6 +383,15 @@ impl Storage {
             (Self::Metal(s1), Self::Metal(s2), Self::Metal(s3)) => {
                 c.metal_fwd(s1, l1, s2, l2, s3, l3)
             }
+            (Self::OpenVino(s1), Self::OpenVino(s2), Self::OpenVino(s3)) => {
+                let cpu2 = s2.to_cpu_storage()?;
+                let cpu3 = s3.to_cpu_storage()?;
+                let cpu1 = s1.to_cpu_storage()?;
+                let mut cpu1_mut = cpu1;
+                c.cpu_fwd(&mut cpu1_mut, l1, &cpu2, l2, &cpu3, l3)?;
+                s1.replace_storage_from_cpu(cpu1_mut)?;
+                Ok(())
+            }
             _ => unreachable!(),
         }
     }
@@ -330,6 +409,10 @@ impl Storage {
             Self::Metal(storage) => {
                 let storage = storage.unary_impl::<B>(layout)?;
                 Ok(Self::Metal(storage))
+            }
+            Self::OpenVino(storage) => {
+                let storage = storage.unary_impl::<B>(layout)?;
+                Ok(Self::OpenVino(storage))
             }
         }
     }
@@ -355,9 +438,11 @@ impl Storage {
                 let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
                 Ok(Self::Metal(storage))
             }
+            (Self::OpenVino(lhs), Self::OpenVino(rhs)) => {
+                let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
+                Ok(Self::OpenVino(storage))
+            }
             (lhs, rhs) => {
-                // Should not happen because of the same device check above but we're defensive
-                // anyway.
                 Err(Error::DeviceMismatchBinaryOp {
                     lhs: lhs.device().location(),
                     rhs: rhs.device().location(),
@@ -390,6 +475,10 @@ impl Storage {
                 let s = inp.conv1d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
             }
+            (Storage::OpenVino(inp), Storage::OpenVino(kernel)) => {
+                let s = inp.conv1d(l, kernel, kernel_l, params)?;
+                Ok(Self::OpenVino(s))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -420,6 +509,10 @@ impl Storage {
             (Storage::Metal(inp), Storage::Metal(kernel)) => {
                 let s = inp.conv_transpose1d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
+            }
+            (Storage::OpenVino(inp), Storage::OpenVino(kernel)) => {
+                let s = inp.conv_transpose1d(l, kernel, kernel_l, params)?;
+                Ok(Self::OpenVino(s))
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
@@ -452,6 +545,10 @@ impl Storage {
                 let s = inp.conv2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
             }
+            (Storage::OpenVino(inp), Storage::OpenVino(kernel)) => {
+                let s = inp.conv2d(l, kernel, kernel_l, params)?;
+                Ok(Self::OpenVino(s))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -483,6 +580,10 @@ impl Storage {
                 let s = inp.conv_transpose2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
             }
+            (Storage::OpenVino(inp), Storage::OpenVino(kernel)) => {
+                let s = inp.conv_transpose2d(l, kernel, kernel_l, params)?;
+                Ok(Self::OpenVino(s))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -511,6 +612,10 @@ impl Storage {
                 let storage = storage.avg_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Metal(storage))
             }
+            Self::OpenVino(storage) => {
+                let storage = storage.avg_pool2d(layout, kernel_size, stride)?;
+                Ok(Self::OpenVino(storage))
+            }
         }
     }
 
@@ -533,6 +638,10 @@ impl Storage {
                 let storage = storage.max_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Metal(storage))
             }
+            Self::OpenVino(storage) => {
+                let storage = storage.max_pool2d(layout, kernel_size, stride)?;
+                Ok(Self::OpenVino(storage))
+            }
         }
     }
 
@@ -550,6 +659,10 @@ impl Storage {
                 let storage = storage.upsample_nearest1d(layout, sz)?;
                 Ok(Self::Metal(storage))
             }
+            Self::OpenVino(storage) => {
+                let storage = storage.upsample_nearest1d(layout, sz)?;
+                Ok(Self::OpenVino(storage))
+            }
         }
     }
 
@@ -566,6 +679,10 @@ impl Storage {
             Self::Metal(storage) => {
                 let storage = storage.upsample_nearest2d(layout, h, w)?;
                 Ok(Self::Metal(storage))
+            }
+            Self::OpenVino(storage) => {
+                let storage = storage.upsample_nearest2d(layout, h, w)?;
+                Ok(Self::OpenVino(storage))
             }
         }
     }
@@ -595,6 +712,11 @@ impl Storage {
                     storage.upsample_bilinear2d(layout, h, w, align_corners, scale_h, scale_w)?;
                 Ok(Self::Metal(storage))
             }
+            Self::OpenVino(storage) => {
+                let storage =
+                    storage.upsample_bilinear2d(layout, h, w, align_corners, scale_h, scale_w)?;
+                Ok(Self::OpenVino(storage))
+            }
         }
     }
 
@@ -621,6 +743,10 @@ impl Storage {
             (Self::Metal(cond), Self::Metal(t), Self::Metal(f)) => {
                 let storage = cond.where_cond(layout, t, layout_t, f, layout_f)?;
                 Ok(Self::Metal(storage))
+            }
+            (Self::OpenVino(cond), Self::OpenVino(t), Self::OpenVino(f)) => {
+                let storage = cond.where_cond(layout, t, layout_t, f, layout_f)?;
+                Ok(Self::OpenVino(storage))
             }
             (_, lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
@@ -652,6 +778,10 @@ impl Storage {
                 let storage = s.gather(l, indexes, indexes_l, d)?;
                 Ok(Self::Metal(storage))
             }
+            (Self::OpenVino(s), Self::OpenVino(indexes)) => {
+                let storage = s.gather(l, indexes, indexes_l, d)?;
+                Ok(Self::OpenVino(storage))
+            }
             _ => unreachable!(),
         }
     }
@@ -675,6 +805,9 @@ impl Storage {
                 s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             (Self::Metal(s), Self::Metal(indexes), Self::Metal(source)) => {
+                s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
+            }
+            (Self::OpenVino(s), Self::OpenVino(indexes), Self::OpenVino(source)) => {
                 s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             _ => unreachable!(),
@@ -701,6 +834,9 @@ impl Storage {
                 s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             (Self::Metal(s), Self::Metal(indexes), Self::Metal(source)) => {
+                s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
+            }
+            (Self::OpenVino(s), Self::OpenVino(indexes), Self::OpenVino(source)) => {
                 s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             _ => unreachable!(),
@@ -732,6 +868,10 @@ impl Storage {
                 let storage = s.index_add(l, indexes, indexes_l, source, source_l, d)?;
                 Ok(Self::Metal(storage))
             }
+            (Self::OpenVino(s), Self::OpenVino(indexes), Self::OpenVino(source)) => {
+                let storage = s.index_add(l, indexes, indexes_l, source, source_l, d)?;
+                Ok(Self::OpenVino(storage))
+            }
             _ => unreachable!(),
         }
     }
@@ -756,6 +896,10 @@ impl Storage {
             (Self::Metal(lhs), Self::Metal(rhs)) => {
                 let storage = lhs.index_select(rhs, lhs_l, rhs_l, d)?;
                 Ok(Self::Metal(storage))
+            }
+            (Self::OpenVino(lhs), Self::OpenVino(rhs)) => {
+                let storage = lhs.index_select(rhs, lhs_l, rhs_l, d)?;
+                Ok(Self::OpenVino(storage))
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
@@ -788,6 +932,10 @@ impl Storage {
                 let storage = lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout)?;
                 Ok(Self::Metal(storage))
             }
+            (Self::OpenVino(lhs), Self::OpenVino(rhs)) => {
+                let storage = lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout)?;
+                Ok(Self::OpenVino(storage))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -808,6 +956,9 @@ impl Storage {
             (Self::Cpu(src), Self::Cpu(dst)) => src.copy_strided_src(dst, dst_offset, src_l),
             (Self::Cuda(src), Self::Cuda(dst)) => Ok(src.copy_strided_src(dst, dst_offset, src_l)?),
             (Self::Metal(src), Self::Metal(dst)) => {
+                Ok(src.copy_strided_src(dst, dst_offset, src_l)?)
+            }
+            (Self::OpenVino(src), Self::OpenVino(dst)) => {
                 Ok(src.copy_strided_src(dst, dst_offset, src_l)?)
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
@@ -836,6 +987,9 @@ impl Storage {
                 Ok(src.copy2d(dst, d1, d2, src_s, dst_s, src_o, dst_o)?)
             }
             (Self::Metal(src), Self::Metal(dst)) => {
+                Ok(src.copy2d(dst, d1, d2, src_s, dst_s, src_o, dst_o)?)
+            }
+            (Self::OpenVino(src), Self::OpenVino(dst)) => {
                 Ok(src.copy2d(dst, d1, d2, src_s, dst_s, src_o, dst_o)?)
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {

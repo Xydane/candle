@@ -80,6 +80,11 @@ impl Device {
                 let storage = cuda::QCudaStorage::zeros(cuda, elem_count, dtype)?;
                 Ok(QStorage::Cuda(storage))
             }
+            Device::OpenVino(_) => {
+                // Fall back to CPU-hosted quantized storage for OpenVINO.
+                let storage = dtype.cpu_zeros(elem_count);
+                Ok(QStorage::Cpu(storage))
+            }
         }
     }
 }
@@ -129,6 +134,10 @@ impl QStorage {
                 GgmlDType::Q8K => cuda::load_quantized(d, as_t_slice::<BlockQ8K>(data)),
                 GgmlDType::BF16 => cuda::load_quantized(d, as_t_slice::<bf16>(data)),
             },
+            Device::OpenVino(_) => {
+                // Fall back to CPU-hosted quantized storage for OpenVINO.
+                Ok(Self::Cpu(dtype.from_data(Cow::Borrowed(data))))
+            }
         }
     }
 

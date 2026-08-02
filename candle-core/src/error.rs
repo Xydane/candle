@@ -1,6 +1,7 @@
 //! Candle-specific Error and Result
 use std::{convert::Infallible, fmt::Display};
 
+use crate::dummy_openvino_backend::OpenVinoError;
 use crate::{DType, DeviceLocation, Layout, MetalError, Shape};
 
 #[derive(Debug, Clone)]
@@ -164,6 +165,9 @@ pub enum Error {
     #[error("the candle crate has not been built with metal support")]
     NotCompiledWithMetalSupport,
 
+    #[error("the candle crate has not been built with openvino support")]
+    NotCompiledWithOpenVinoSupport,
+
     #[error("cannot find tensor {path}")]
     CannotFindTensor { path: String },
 
@@ -173,6 +177,9 @@ pub enum Error {
 
     #[error("Metal error {0}")]
     Metal(#[from] MetalError),
+
+    #[error("OpenVINO error {0}")]
+    OpenVino(OpenVinoError),
 
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios"), feature = "ug"))]
     #[error(transparent)]
